@@ -56,34 +56,34 @@ enum DnsPacketParseError {
     OutOfBounds { index: usize, length: usize },
 }
 
+fn get8(index: usize, value: &[u8]) -> Result<u8, DnsPacketParseError> {
+    value
+        .get(index)
+        .cloned()
+        .ok_or_else(|| DnsPacketParseError::OutOfBounds {
+            index,
+            length: value.len(),
+        })
+}
+
+fn get16(index: usize, value: &[u8]) -> Result<u16, DnsPacketParseError> {
+    let b = get8(index + 1, value)? as u16;
+    let a = get8(index, value)? as u16;
+    Ok((a << 8) + b)
+}
+
 impl TryFrom<&[u8]> for DnsPacket {
     type Error = DnsPacketParseError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let get8 = |index: usize| -> Result<u8, Self::Error> {
-            value
-                .get(index)
-                .cloned()
-                .ok_or_else(|| Self::Error::OutOfBounds {
-                    index,
-                    length: value.len(),
-                })
-        };
-
-        let get16 = |index: usize| -> Result<u16, Self::Error> {
-            let b = get8(index + 1)? as u16;
-            let a = get8(index)? as u16;
-            Ok((a << 8) + b)
-        };
-
-        let packet_identifier = get16(0)?;
-        let query_response = if get8(2)? >> 7 == 1 {
+        let packet_identifier = get16(0, value)?;
+        let query_response = if get8(2, value)? >> 7 == 1 {
             QueryResponse::Response
         } else {
             QueryResponse::Query
         };
 
-        let operation_code = match (get8(2)? >> 3) & 0b1111 {
+        let operation_code = match (get8(2, value)? >> 3) & 0b1111 {
             0 => Opcode::Query,
             1 => Opcode::IQuery,
             2 => Opcode::Status,
@@ -93,11 +93,11 @@ impl TryFrom<&[u8]> for DnsPacket {
             _ => Opcode::Unassigned,
         };
 
-        let authoritative_answer = (get8(2)? >> 2) & 1 == 1;
-        let truncated_message = (get8(2)? >> 1) & 1 == 1;
-        let recursion_desired = get8(2)? & 1 == 1;
-        let recursion_available = get8(3)? >> 7 == 1;
-        let response_code = match get8(3)? & 0b1111 {
+        let authoritative_answer = (get8(2, value)? >> 2) & 1 == 1;
+        let truncated_message = (get8(2, value)? >> 1) & 1 == 1;
+        let recursion_desired = get8(2, value)? & 1 == 1;
+        let recursion_available = get8(3, value)? >> 7 == 1;
+        let response_code = match get8(3, value)? & 0b1111 {
             0 => Ok(()),
             1 => Err(RCode::FormErr),
             2 => Err(RCode::ServFail),
@@ -113,10 +113,10 @@ impl TryFrom<&[u8]> for DnsPacket {
             _ => Err(RCode::Unassigned),
         };
 
-        let question_count = get16(4)?;
-        let answer_count = get16(6)?;
-        let authority_count = get16(8)?;
-        let additional_count = get16(10)?;
+        let question_count = get16(4, value)?;
+        let answer_count = get16(6, value)?;
+        let authority_count = get16(8, value)?;
+        let additional_count = get16(10, value)?;
 
         Ok(DnsPacket {
             packet_identifier,
