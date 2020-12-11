@@ -50,10 +50,52 @@ struct DnsPacket {
     additional_count: u16,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 enum DnsPacketParseError {
     #[error("byte index {index:?} was out of bounds (length: {length:?})")]
     OutOfBounds { index: usize, length: usize },
+    #[error("too many jumps reading label")]
+    JumpLimitExceeded,
+}
+
+struct LabelSequenceIterator<'a> {
+    packet: &'a [u8],
+    position: u16,
+}
+
+impl<'a> LabelSequenceIterator<'a> {
+    fn read_section(&mut self) -> Result<Option<&'a [u8]>, DnsPacketParseError> {
+        let mut jump_counter = 0;
+        while get8(self.position as usize, self.packet)? & 0b11000000 == 0b11000000 {
+            jump_counter += 1;
+            if jump_counter > 5 {
+                return Err(DnsPacketParseError::JumpLimitExceeded);
+            }
+            self.position = get16(self.position as usize, self.packet)? & 0b0011_1111_1111_1111;
+        }
+        let length = get8(self.position as usize, self.packet)? & 0b0011_1111;
+        if length == 0 {
+            return Ok(None);
+        }
+        let old_position = self.position as usize + 1;
+        let new_position = old_position + length as usize;
+        let content = self.packet.get(old_position..new_position).ok_or_else(|| {
+            DnsPacketParseError::OutOfBounds {
+                index: new_position - 1,
+                length: self.packet.len(),
+            }
+        })?;
+        self.position = self.position + length as u16 + 1;
+        Ok(Some(content))
+    }
+}
+
+impl<'a> Iterator for LabelSequenceIterator<'a> {
+    type Item = Result<&'a [u8], DnsPacketParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.read_section().transpose()
+    }
 }
 
 fn get8(index: usize, value: &[u8]) -> Result<u8, DnsPacketParseError> {
@@ -282,6 +324,34 @@ mod tests {
                 .unwrap()
                 .additional_count,
             0
+        );
+    }
+
+    #[test]
+    fn label_sequence() {
+        let i = LabelSequenceIterator {
+            packet: QUERY_PACKET,
+            position: 12,
+        };
+        assert_eq!(
+            i.collect::<Result<Vec<_>, _>>(),
+            Ok(vec!["google".as_bytes(), "com".as_bytes()])
+        );
+        let j = LabelSequenceIterator {
+            packet: RESPONSE_PACKET,
+            position: 12,
+        };
+        assert_eq!(
+            j.collect::<Result<Vec<_>, _>>(),
+            Ok(vec!["google".as_bytes(), "com".as_bytes()])
+        );
+        let k = LabelSequenceIterator {
+            packet: RESPONSE_PACKET,
+            position: 28,
+        };
+        assert_eq!(
+            k.collect::<Result<Vec<_>, _>>(),
+            Ok(vec!["google".as_bytes(), "com".as_bytes()])
         );
     }
 }
