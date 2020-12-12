@@ -52,10 +52,22 @@ struct DnsPacket {
 }
 
 #[derive(Debug, PartialEq)]
+enum RecordType {
+    AddressRecord,
+    Other,
+}
+
+#[derive(Debug, PartialEq)]
+enum Class {
+    Internet,
+    Other,
+}
+
+#[derive(Debug, PartialEq)]
 struct Question {
     name: String,
-    r#type: u16,
-    class: u16,
+    r#type: RecordType,
+    class: Class,
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -197,8 +209,14 @@ impl TryFrom<&[u8]> for DnsPacket {
             }
             questions.push(Question {
                 name,
-                r#type: get16(position as usize, value)?,
-                class: get16(position as usize + 2, value)?,
+                class: match get16(position as usize + 2, value)? {
+                    1 => Class::Internet,
+                    _ => Class::Other,
+                },
+                r#type: match get16(position as usize, value)? {
+                    1 => RecordType::AddressRecord,
+                    _ => RecordType::Other,
+                },
             });
             position += 4;
         }
@@ -404,16 +422,16 @@ mod tests {
             DnsPacket::try_from(QUERY_PACKET).unwrap().questions,
             vec![Question {
                 name: "google.com".to_string(),
-                r#type: 1,
-                class: 1
+                r#type: RecordType::AddressRecord,
+                class: Class::Internet
             }]
         );
         assert_eq!(
             DnsPacket::try_from(RESPONSE_PACKET).unwrap().questions,
             vec![Question {
                 name: "google.com".to_string(),
-                r#type: 1,
-                class: 1
+                r#type: RecordType::AddressRecord,
+                class: Class::Internet
             }]
         );
     }
