@@ -61,14 +61,14 @@ enum DnsPacketParseError {
 struct LabelSequenceIterator<'a> {
     packet: &'a [u8],
     position: u16,
+    jump_counter: u8,
 }
 
 impl<'a> LabelSequenceIterator<'a> {
     fn read_section(&mut self) -> Result<Option<&'a [u8]>, DnsPacketParseError> {
-        let mut jump_counter = 0;
         while get8(self.position as usize, self.packet)? & 0b11000000 == 0b11000000 {
-            jump_counter += 1;
-            if jump_counter > 5 {
+            self.jump_counter += 1;
+            if self.jump_counter > 5 {
                 return Err(DnsPacketParseError::JumpLimitExceeded);
             }
             self.position = get16(self.position as usize, self.packet)? & 0b0011_1111_1111_1111;
@@ -332,6 +332,7 @@ mod tests {
         let i = LabelSequenceIterator {
             packet: QUERY_PACKET,
             position: 12,
+            jump_counter: 0,
         };
         assert_eq!(
             i.collect::<Result<Vec<_>, _>>(),
@@ -340,6 +341,7 @@ mod tests {
         let j = LabelSequenceIterator {
             packet: RESPONSE_PACKET,
             position: 12,
+            jump_counter: 0,
         };
         assert_eq!(
             j.collect::<Result<Vec<_>, _>>(),
@@ -348,6 +350,7 @@ mod tests {
         let k = LabelSequenceIterator {
             packet: RESPONSE_PACKET,
             position: 28,
+            jump_counter: 0,
         };
         assert_eq!(
             k.collect::<Result<Vec<_>, _>>(),
