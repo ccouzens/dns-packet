@@ -48,6 +48,14 @@ struct DnsPacket {
     answer_count: u16,
     authority_count: u16,
     additional_count: u16,
+    questions: Vec<Question>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Question {
+    name: String,
+    r#type: u16,
+    class: u16,
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -58,22 +66,38 @@ enum DnsPacketParseError {
     JumpLimitExceeded,
 }
 
-struct LabelSequenceIterator<'a> {
-    packet: &'a [u8],
+struct LabelSequenceIterator<'a, 'b> {
     position: u16,
+    packet: &'a [u8],
+    global_position: &'b mut u16,
     jump_counter: u8,
 }
 
-impl<'a> LabelSequenceIterator<'a> {
+impl<'a, 'b> LabelSequenceIterator<'a, 'b> {
+    fn new(position: &'b mut u16, packet: &'a [u8]) -> Self {
+        Self {
+            position: *position,
+            packet,
+            global_position: position,
+            jump_counter: 0,
+        }
+    }
+
     fn read_section(&mut self) -> Result<Option<&'a [u8]>, DnsPacketParseError> {
         while get8(self.position as usize, self.packet)? & 0b11000000 == 0b11000000 {
+            if self.jump_counter == 0 {
+                *self.global_position += 2;
+            }
+            self.position = get16(self.position as usize, self.packet)? & 0b0011_1111_1111_1111;
             self.jump_counter += 1;
             if self.jump_counter > 5 {
                 return Err(DnsPacketParseError::JumpLimitExceeded);
             }
-            self.position = get16(self.position as usize, self.packet)? & 0b0011_1111_1111_1111;
         }
         let length = get8(self.position as usize, self.packet)? & 0b0011_1111;
+        if self.jump_counter == 0 {
+            *self.global_position += 1 + length as u16;
+        }
         if length == 0 {
             return Ok(None);
         }
@@ -90,7 +114,7 @@ impl<'a> LabelSequenceIterator<'a> {
     }
 }
 
-impl<'a> Iterator for LabelSequenceIterator<'a> {
+impl<'a, 'b> Iterator for LabelSequenceIterator<'a, 'b> {
     type Item = Result<&'a [u8], DnsPacketParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -160,6 +184,25 @@ impl TryFrom<&[u8]> for DnsPacket {
         let authority_count = get16(8, value)?;
         let additional_count = get16(10, value)?;
 
+        let mut position = 12;
+
+        let mut questions = Vec::with_capacity(question_count as usize);
+        for _ in 0..question_count {
+            let mut name = String::new();
+            for label in LabelSequenceIterator::new(&mut position, value) {
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                name.extend(label?.iter().map(|&b| char::from(b)));
+            }
+            questions.push(Question {
+                name,
+                r#type: get16(position as usize, value)?,
+                class: get16(position as usize + 2, value)?,
+            });
+            position += 4;
+        }
+
         Ok(DnsPacket {
             packet_identifier,
             query_response,
@@ -173,6 +216,7 @@ impl TryFrom<&[u8]> for DnsPacket {
             answer_count,
             authority_count,
             additional_count,
+            questions,
         })
     }
 }
@@ -329,32 +373,48 @@ mod tests {
 
     #[test]
     fn label_sequence() {
-        let i = LabelSequenceIterator {
-            packet: QUERY_PACKET,
-            position: 12,
-            jump_counter: 0,
-        };
+        let mut position = 12;
+        let i = LabelSequenceIterator::new(&mut position, QUERY_PACKET);
         assert_eq!(
             i.collect::<Result<Vec<_>, _>>(),
             Ok(vec!["google".as_bytes(), "com".as_bytes()])
         );
-        let j = LabelSequenceIterator {
-            packet: RESPONSE_PACKET,
-            position: 12,
-            jump_counter: 0,
-        };
+        assert_eq!(position, 24);
+
+        position = 12;
+        let j = LabelSequenceIterator::new(&mut position, RESPONSE_PACKET);
         assert_eq!(
             j.collect::<Result<Vec<_>, _>>(),
             Ok(vec!["google".as_bytes(), "com".as_bytes()])
         );
-        let k = LabelSequenceIterator {
-            packet: RESPONSE_PACKET,
-            position: 28,
-            jump_counter: 0,
-        };
+        assert_eq!(position, 24);
+
+        position = 28;
+        let k = LabelSequenceIterator::new(&mut position, RESPONSE_PACKET);
         assert_eq!(
             k.collect::<Result<Vec<_>, _>>(),
             Ok(vec!["google".as_bytes(), "com".as_bytes()])
+        );
+        assert_eq!(position, 30);
+    }
+
+    #[test]
+    fn questions() {
+        assert_eq!(
+            DnsPacket::try_from(QUERY_PACKET).unwrap().questions,
+            vec![Question {
+                name: "google.com".to_string(),
+                r#type: 1,
+                class: 1
+            }]
+        );
+        assert_eq!(
+            DnsPacket::try_from(RESPONSE_PACKET).unwrap().questions,
+            vec![Question {
+                name: "google.com".to_string(),
+                r#type: 1,
+                class: 1
+            }]
         );
     }
 }
