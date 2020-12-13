@@ -49,6 +49,7 @@ struct DnsPacket {
     authority_count: u16,
     additional_count: u16,
     questions: Vec<Question>,
+    answers: Vec<RecordPreamble>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -134,6 +135,12 @@ impl<'a, 'b> Iterator for LabelSequenceIterator<'a, 'b> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct RecordPreamble {
+    question: Question,
+    time_to_live: u32,
+}
+
 fn get8(index: usize, value: &[u8]) -> Result<u8, DnsPacketParseError> {
     value
         .get(index)
@@ -148,6 +155,14 @@ fn get16(index: usize, value: &[u8]) -> Result<u16, DnsPacketParseError> {
     let b = get8(index + 1, value)? as u16;
     let a = get8(index, value)? as u16;
     Ok((a << 8) + b)
+}
+
+fn get32(index: usize, value: &[u8]) -> Result<u32, DnsPacketParseError> {
+    let d = get8(index + 3, value)? as u32;
+    let c = get8(index + 2, value)? as u32;
+    let b = get8(index + 1, value)? as u32;
+    let a = get8(index, value)? as u32;
+    Ok((a << 24) + (b << 16) + (c << 8) + d)
 }
 
 impl TryFrom<&[u8]> for DnsPacket {
@@ -200,26 +215,12 @@ impl TryFrom<&[u8]> for DnsPacket {
 
         let mut questions = Vec::with_capacity(question_count as usize);
         for _ in 0..question_count {
-            let mut name = String::new();
-            for label in LabelSequenceIterator::new(&mut position, value) {
-                if !name.is_empty() {
-                    name.push('.');
-                }
-                name.extend(label?.iter().map(|&b| char::from(b)));
-            }
-            questions.push(Question {
-                name,
-                class: match get16(position as usize + 2, value)? {
-                    1 => Class::Internet,
-                    _ => Class::Other,
-                },
-                r#type: match get16(position as usize, value)? {
-                    1 => RecordType::AddressRecord,
-                    _ => RecordType::Other,
-                },
-            });
-            position += 4;
+            questions.push(Question::try_from((value, &mut position))?);
         }
+
+        let answers: Vec<RecordPreamble> = (0..answer_count)
+            .map(|_| RecordPreamble::try_from((value, &mut position)))
+            .collect::<Result<Vec<RecordPreamble>, Self::Error>>()?;
 
         Ok(DnsPacket {
             packet_identifier,
@@ -235,6 +236,48 @@ impl TryFrom<&[u8]> for DnsPacket {
             authority_count,
             additional_count,
             questions,
+            answers,
+        })
+    }
+}
+
+impl TryFrom<(&[u8], &mut u16)> for Question {
+    type Error = DnsPacketParseError;
+
+    fn try_from((value, position): (&[u8], &mut u16)) -> Result<Self, Self::Error> {
+        let mut name = String::new();
+        for label in LabelSequenceIterator::new(position, value) {
+            if !name.is_empty() {
+                name.push('.');
+            }
+            name.extend(label?.iter().map(|&b| char::from(b)));
+        }
+        let class = match get16(*position as usize + 2, value)? {
+            1 => Class::Internet,
+            _ => Class::Other,
+        };
+        let r#type = match get16(*position as usize, value)? {
+            1 => RecordType::AddressRecord,
+            _ => RecordType::Other,
+        };
+        *position += 4;
+        Ok(Question {
+            name,
+            class,
+            r#type,
+        })
+    }
+}
+impl TryFrom<(&[u8], &mut u16)> for RecordPreamble {
+    type Error = DnsPacketParseError;
+
+    fn try_from((value, position): (&[u8], &mut u16)) -> Result<Self, Self::Error> {
+        let question = Question::try_from((value, &mut *position))?;
+        let time_to_live = get32((*position) as usize, value)?;
+        *position += 4;
+        Ok(Self {
+            question,
+            time_to_live,
         })
     }
 }
@@ -432,6 +475,21 @@ mod tests {
                 name: "google.com".to_string(),
                 r#type: RecordType::AddressRecord,
                 class: Class::Internet
+            }]
+        );
+    }
+    #[test]
+    fn answers() {
+        assert_eq!(DnsPacket::try_from(QUERY_PACKET).unwrap().answers, vec![]);
+        assert_eq!(
+            DnsPacket::try_from(RESPONSE_PACKET).unwrap().answers,
+            vec![RecordPreamble {
+                question: Question {
+                    name: "google.com".to_string(),
+                    r#type: RecordType::AddressRecord,
+                    class: Class::Internet
+                },
+                time_to_live: 264
             }]
         );
     }
