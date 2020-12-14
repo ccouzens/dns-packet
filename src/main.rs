@@ -1,6 +1,12 @@
+use color_eyre::eyre::Result;
+use dns_packet::DnsPacket;
+use dns_packet::DnsPacketParseError;
 use pretty_hex::PrettyHex;
 use std::convert::TryFrom;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::net::SocketAddrV4;
+use std::net::UdpSocket;
 use structopt::StructOpt;
 use thiserror::Error;
 
@@ -10,6 +16,18 @@ enum MainError {
     LabelSize { label: String },
     #[error("label {label:} contains invalid characters")]
     LabelInvalidCharacter { label: String },
+    #[error("Error during bind")]
+    BindError(#[source] std::io::Error),
+    #[error("Error during send")]
+    SendError(#[source] std::io::Error),
+    #[error("Error during receive")]
+    ReceiveError(#[source] std::io::Error),
+    #[error("Response received from unexpected host {0:}")]
+    UnexpectedReceive(SocketAddr),
+    #[error("Failed to read {0:} from response data")]
+    InvalidBuffer(usize),
+    #[error("Failed to parse DNS response")]
+    InvalidDnsPacket(#[source] DnsPacketParseError),
 }
 
 #[derive(StructOpt, Debug)]
@@ -18,7 +36,8 @@ struct Opt {
     resolver: Ipv4Addr,
 }
 
-fn main() -> Result<(), MainError> {
+fn main() -> Result<()> {
+    color_eyre::install()?;
     let opt = Opt::from_args();
     let mut request_packet = Vec::new();
     // Header ID
@@ -51,7 +70,8 @@ fn main() -> Result<(), MainError> {
                 _ => {
                     return Err(MainError::LabelInvalidCharacter {
                         label: label.to_string(),
-                    })
+                    }
+                    .into())
                 }
             }
         }
@@ -64,5 +84,33 @@ fn main() -> Result<(), MainError> {
     request_packet.extend_from_slice(&[0, 1]);
 
     println!("request packet: {:?}", request_packet.hex_dump());
+
+    let resolver_address = SocketAddrV4::new(opt.resolver, 53);
+
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .map_err(MainError::BindError)?;
+
+    socket
+        .send_to(&request_packet, resolver_address)
+        .map_err(MainError::SendError)?;
+
+    let mut buf = [0; 512];
+    let (number_of_bytes_received, src_addr) = socket
+        .recv_from(&mut buf)
+        .map_err(MainError::ReceiveError)?;
+    if src_addr != std::net::SocketAddr::V4(resolver_address) {
+        return Err(MainError::UnexpectedReceive(src_addr).into());
+    }
+
+    let response_packet = buf
+        .get(0..number_of_bytes_received)
+        .ok_or(MainError::InvalidBuffer(number_of_bytes_received))?;
+
+    println!("\nresponse packet: {:?}", response_packet.hex_dump());
+
+    let dns_packet = DnsPacket::try_from(response_packet).map_err(MainError::InvalidDnsPacket)?;
+
+    println!("\n{:?}", dns_packet.answers);
+
     Ok(())
 }

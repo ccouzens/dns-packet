@@ -36,7 +36,7 @@ enum RCode {
 }
 
 #[derive(Debug)]
-struct DnsPacket {
+pub struct DnsPacket {
     packet_identifier: u16,
     query_response: QueryResponse,
     operation_code: Opcode,
@@ -50,11 +50,11 @@ struct DnsPacket {
     authority_count: u16,
     additional_count: u16,
     questions: Vec<Question>,
-    answers: Vec<Record>,
+    pub answers: Vec<Record>,
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-enum RecordType {
+pub enum RecordType {
     AddressRecord,
     Other,
 }
@@ -73,7 +73,7 @@ struct Question {
 }
 
 #[derive(Error, Debug, PartialEq)]
-enum DnsPacketParseError {
+pub enum DnsPacketParseError {
     #[error("byte index {index:?} was out of bounds (length: {length:?})")]
     OutOfBounds { index: usize, length: usize },
     #[error("too many jumps reading label")]
@@ -143,7 +143,7 @@ impl<'a, 'b> Iterator for LabelSequenceIterator<'a, 'b> {
 }
 
 #[derive(Debug, PartialEq)]
-struct Record {
+pub struct Record {
     question: Question,
     time_to_live: u32,
     length: u16,
