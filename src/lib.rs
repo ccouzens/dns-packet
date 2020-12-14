@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::net::Ipv4Addr;
 use thiserror::Error;
 
 #[derive(Debug, PartialEq)]
@@ -49,10 +50,10 @@ struct DnsPacket {
     authority_count: u16,
     additional_count: u16,
     questions: Vec<Question>,
-    answers: Vec<RecordPreamble>,
+    answers: Vec<Record>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 enum RecordType {
     AddressRecord,
     Other,
@@ -77,6 +78,12 @@ enum DnsPacketParseError {
     OutOfBounds { index: usize, length: usize },
     #[error("too many jumps reading label")]
     JumpLimitExceeded,
+    #[error("exected {r#type:?} to be {expected_size:}, but was {actual_size:}")]
+    UnexpectedRecordSize {
+        r#type: RecordType,
+        expected_size: u16,
+        actual_size: u16,
+    },
 }
 
 struct LabelSequenceIterator<'a, 'b> {
@@ -136,9 +143,17 @@ impl<'a, 'b> Iterator for LabelSequenceIterator<'a, 'b> {
 }
 
 #[derive(Debug, PartialEq)]
-struct RecordPreamble {
+struct Record {
     question: Question,
     time_to_live: u32,
+    length: u16,
+    data: RecordData,
+}
+
+#[derive(Debug, PartialEq)]
+enum RecordData {
+    A(Ipv4Addr),
+    Other,
 }
 
 fn get8(index: usize, value: &[u8]) -> Result<u8, DnsPacketParseError> {
@@ -218,9 +233,9 @@ impl TryFrom<&[u8]> for DnsPacket {
             questions.push(Question::try_from((value, &mut position))?);
         }
 
-        let answers: Vec<RecordPreamble> = (0..answer_count)
-            .map(|_| RecordPreamble::try_from((value, &mut position)))
-            .collect::<Result<Vec<RecordPreamble>, Self::Error>>()?;
+        let answers: Vec<Record> = (0..answer_count)
+            .map(|_| Record::try_from((value, &mut position)))
+            .collect::<Result<Vec<Record>, Self::Error>>()?;
 
         Ok(DnsPacket {
             packet_identifier,
@@ -268,16 +283,36 @@ impl TryFrom<(&[u8], &mut u16)> for Question {
         })
     }
 }
-impl TryFrom<(&[u8], &mut u16)> for RecordPreamble {
+impl TryFrom<(&[u8], &mut u16)> for Record {
     type Error = DnsPacketParseError;
 
     fn try_from((value, position): (&[u8], &mut u16)) -> Result<Self, Self::Error> {
         let question = Question::try_from((value, &mut *position))?;
         let time_to_live = get32((*position) as usize, value)?;
-        *position += 4;
+        let length = get16((*position) as usize + 4, value)?;
+        *position += 6;
+        let data = match (question.r#type, length) {
+            (RecordType::AddressRecord, 4) => RecordData::A(Ipv4Addr::new(
+                get8(*position as usize, value)?,
+                get8(*position as usize + 1, value)?,
+                get8(*position as usize + 2, value)?,
+                get8(*position as usize + 3, value)?,
+            )),
+            (RecordType::AddressRecord, actual_size) => {
+                return Err(Self::Error::UnexpectedRecordSize {
+                    actual_size,
+                    r#type: question.r#type,
+                    expected_size: 4,
+                })
+            }
+            (_, _) => RecordData::Other,
+        };
+        *position += length;
         Ok(Self {
             question,
             time_to_live,
+            length,
+            data,
         })
     }
 }
@@ -483,13 +518,15 @@ mod tests {
         assert_eq!(DnsPacket::try_from(QUERY_PACKET).unwrap().answers, vec![]);
         assert_eq!(
             DnsPacket::try_from(RESPONSE_PACKET).unwrap().answers,
-            vec![RecordPreamble {
+            vec![Record {
                 question: Question {
                     name: "google.com".to_string(),
                     r#type: RecordType::AddressRecord,
-                    class: Class::Internet
+                    class: Class::Internet,
                 },
-                time_to_live: 264
+                time_to_live: 264,
+                length: 4,
+                data: RecordData::A(Ipv4Addr::new(216, 58, 211, 174))
             }]
         );
     }
